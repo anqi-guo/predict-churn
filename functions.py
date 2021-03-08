@@ -51,9 +51,9 @@ def get_df(data):
               '#screen_width',
               '#screen_height',
               '#network_type',
-              'birthday',
+              #'birthday',
               'register_time',
-              'channel.1'
+              'qudao'
              ]].copy()
 
     df_.drop_duplicates(subset='#account_id',keep='last', inplace=True, ignore_index=True)
@@ -64,14 +64,14 @@ def get_df(data):
     return df
 
 def count_unique_event(data):
-    return data.groupby('#account_id')['#event_name'].nunique().to_frame(name='event_cnt_unique')
+    return data.groupby('#account_id')['#event_name'].nunique().to_frame(name='event_CNT_unique')
 
 def count_total_events(data):
-    return data.groupby('#account_id')['#event_name'].count().to_frame(name='event_cnt_total')
+    return data.groupby('#account_id')['#event_name'].count().to_frame(name='CNT_total')
 
 def count_each_event(data):
     group = data.groupby(['#account_id','#event_name']).size().unstack()
-    group = group.add_prefix('event_cnt_')
+    group = group.add_prefix('CNT_')
     return group
 
 def get_event_time(data):
@@ -87,18 +87,194 @@ def get_event_time_by_event(data):
     group.columns = ['_'.join(t) for t in group.columns]
     return group
 
+# 人机本
+def ai_guide(data):
+    events_dict = {'ai_guide':['from']
+                  ,'quit_ai_guide':['stage','juben_title']
+                  ,'finish_ai_guide':['juben_title','is_win']
+                  }
+
+    new_features = []
+    for event, attrs in events_dict.items():
+        new_features_e = []
+        for attr in attrs:
+            group = data[data['#event_name']==event][['#account_id',attr]]\
+                    .drop_duplicates(subset='#account_id',keep='last')\
+                    .rename(columns={attr:'%s_LAST_%s'%(event, attr)})\
+                    .set_index('#account_id')
+            new_features_e.append(group)
+        new_features.extend(new_features_e)
+
+    df_features = pd.concat(new_features)
+    df_features = df_features.fillna(0)
+    
+    return df_features
+
+# 点击区域
+def click_button(data):
+    # event_name = click
+    click = data[data['#event_name']=='click'].groupby(['#account_id','click_page']).size().unstack()
+    click = click.add_prefix('CLICK_BUTTON_')
+    click = click.fillna(0)
+
+    page_dict = {'game_page':['guess','juben','party','under','wolf','wolf12','wolf6']
+                ,'mine_page':['daily_bonus','visitor']
+                ,'message_page':['msg_moment']
+                ,'navigate_bar':['main_tab_home','main_tab_live','main_tab_msg','main_tab_profile']}
+
+    for page, buttons in page_dict.items():
+        click['CLICK_in_%s'%page] = 0
+        for button in buttons:
+            click['CLICK_in_%s'%page] += click['CLICK_BUTTON_%s'%button] 
+            
+    # event_name = party_page 房间页点击
+    party_page_tab = data[data['#event_name']=='party_page'].groupby(['#account_id','click_tab']).size().unstack()
+    party_page_tab = party_page_tab.add_prefix('CLICK_TAB_')
+    party_page_button = data[data['#event_name']=='party_page'].groupby(['#account_id','click_button']).size().unstack()
+    party_page_button = party_page_button.add_prefix('CLICK_BUTTON_')
+
+    party_page = party_page_tab.join(party_page_button)
+    party_page = party_page.fillna(0)
+    party_page['CLICK_in_rooms_page'] = party_page.sum(axis=1)
+    
+    
+    df_features = pd.concat([click
+                            ,party_page])
+    
+    return df_features
+
+# 浏览页面
+def view_page(data):
+    # 动态详情页和动态发布页
+    view_moments = data[data['#event_name']=='view_page'].groupby(['#account_id','page_name']).size().unstack()
+    view_moments = view_moments.add_prefix('VIEW_page_')
+    
+    # 商城页
+    view_shop = data[data['#event_name']=='view_shop_page'].groupby('#account_id').size().to_frame(name='VIEW_page_shop')
+    
+    # 技能页
+    view_skill = data[data['#event_name']=='view_skill_page'].groupby('#account_id').size().to_frame(name='VIEW_page_skill')
+    
+    # 个人页
+    ## 看的是自己的个人页还是别人的个人页
+    view_userpage = data[data['#event_name']=='view_user_homepage'].groupby(['#account_id','myself']).size().unstack()
+    view_userpage.rename(columns={'False':'VIEW_page_others_home','True':'VIEW_page_my_home'}, inplace=True)
+    ## 看了多少个别的用户的个人页
+    view_userpage2 = data[(data['#event_name']=='view_user_homepage')&(data['myself']==False)]\
+                    .groupby(['#account_id'])['target_uid'].nunique().to_frame(name='VIEW_page_others_home_nunique')
+        
+    df_features = pd.concat([view_moments
+                            ,view_shop
+                            ,view_skill
+                            ,view_userpage
+                            ,view_userpage2
+                            ])
+    
+    return df_features
+
+# 浏览&点击房间
+def view_click_rooms(data):
+    df_list = []
+    for k,v in {'exposure':'VIEW','click':'CLICK'}.items():
+        # 房间页浏览OR点击tab数量
+        tabs = data[data['#event_name']=='flow_%s'%k].groupby(['#account_id','tab']).size().unstack()
+        tabs = tabs.add_prefix('%s_rooms_TAB_'%v)
+        # 房间页浏览OR点击房间数量
+        rooms = data[data['#event_name']=='flow_%s'%k]\
+                    .groupby(['#account_id'])['rid']\
+                    .count()\
+                    .to_frame(name='%s_rooms_roomCnt'%v)
+        ## 房间页浏览OR点击unique房间数量
+        rooms_unique = data[data['#event_name']=='flow_%s'%k]\
+                            .groupby(['#account_id'])['rid']\
+                            .nunique()\
+                            .to_frame(name='%s_rooms_uniqueRoomCnt'%v)
+        ## 房间页各tab浏览OR点击房间数量
+        rooms_bytab = data[data['#event_name']=='flow_%s'%k].groupby(['#account_id','tab'])['rid'].count().unstack()
+        rooms_bytab = rooms_bytab.add_prefix('%s_rooms_TAB_'%v)
+        rooms_bytab = rooms_bytab.add_suffix('_roomCnt')
+        ### 房间页各tab浏览OR点击unique房间数量
+        rooms_bytab_unique = data[data['#event_name']=='flow_%s'%k].groupby(['#account_id','tab'])['rid'].nunique().unstack()
+        rooms_bytab_unique = rooms_bytab_unique.add_prefix('%s_rooms_TAB_'%v)
+        rooms_bytab_unique = rooms_bytab_unique.add_suffix('_uniqueRoomCnt')
+        # 是否滑动页面 unique_room_cnt >5 则滑动页面
+        if k=='exposure':
+            for tab in data[data['#event_name']=='flow_exposure']['tab'].unique():
+                rooms_bytab_unique['is_slide_TAB_%s'%tab] = np.where(rooms_bytab_unique['VIEW_rooms_TAB_%s_uniqueRoomCnt'%tab] > 5,1,0)
+    
+        df = pd.concat([tabs, rooms, rooms_unique, rooms_bytab, rooms_bytab_unique])
+        df_list.append(df)
+        
+    df_features = pd.concat(df_list)
+    df_features = df_features.fillna(0)
+    
+    # 点击率
+    df_features['RATE_click_rooms'] = df_features['CLICK_rooms_roomCnt']/df_features['VIEW_rooms_roomCnt']
+    
+    for tab in data[data['#event_name']=='flow_click']['tab'].unique(): 
+        df_features['RATE_click_rooms_TAB_%s'%tab] = df_features['CLICK_rooms_TAB_%s_roomCnt'%tab] / df_features['VIEW_rooms_TAB_%s_roomCnt'%tab]
+    
+    
+    return df_features
+
+# 游戏相关
+def game_match(data):
+    # 游戏匹配
+    game_match = data[data['#event_name']=='game_match'].groupby(['#account_id','game_type'])\
+                .size()\
+                .unstack()
+    game_match = game_match.add_prefix('game_match_TYPE_')
+    
+    # 游戏匹配成功
+    ## 次数
+    game_match_success_cnt = data[data['#event_name']=='game_match_success']\
+                            .groupby(['#account_id','game_type'])\
+                            .size()\
+                            .unstack()
+    game_match_success_cnt = game_match_success_cnt.add_prefix('game_match_success_TYPE_')
+    ## 时长
+    game_match_success_duration = data[data['#event_name']=='game_match_success']\
+                                .groupby(['#account_id'])['#duration']\
+                                .agg(['max','min','sum','mean'])
+    game_match_success_duration = game_match_success_duration.add_prefix('DURATION_game_match_success_')
+    game_match_success_duration_by_type = data[data['#event_name']=='game_match_success']\
+                                .groupby(['#account_id','game_type'])['#duration']\
+                                .agg(['max','min','sum','mean'])\
+                                .unstack()
+
+    game_match_success_duration_by_type.columns = ['_TYPE_'.join(col).strip() for col in game_match_success_duration_by_type.columns.values]
+    game_match_success_duration_by_type = game_match_success_duration_by_type.add_prefix('DURATION_game_match_success_')
+
+    
+    # 计算游戏匹配成功率
+    gm = pd.concat([game_match
+                   ,game_match_success_cnt
+                   ,game_match_success_duration
+                   ,game_match_success_duration_by_type])
+    gm = gm.fillna(0)
+    
+    for game in data[data['#event_name']=='game_match_success']['game_type'].unique():
+        gm['RATE_game_match_success_TYPE_%s'%game] = gm['game_match_success_TYPE_%s'%game]/gm['game_match_TYPE_%s'%game]
+        
+    return gm
+
 def add_features(data, features_list):
     features_dict = {
-                     'cue':count_unique_event(data),
-                     'cte':count_total_events(data),
-                     'cee':count_each_event(data),
-                     'get':get_event_time(data),
-                     'getbe':get_event_time_by_event(data)
+        'cue':count_unique_event(data),
+        'cte':count_total_events(data),
+        'cee':count_each_event(data),
+        'get':get_event_time(data),
+        'getbe':get_event_time_by_event(data),
+        'ai':ai_guide(data),
+        'cb':click_button(data),
+        'vp':view_page(data),
+        'vcr':view_click_rooms(data),
+        'gm':game_match(data)
                     }
     features_list_=[]
     for f in features_list:
         features_list_.append(features_dict[f])
-    return pd.concat(features_list_, axis=1)
+    return pd.concat(features_list_)
 
 def fe(file1, file2, features_list):
     
@@ -114,7 +290,7 @@ def fe(file1, file2, features_list):
     return df_featured
                             
 def get_big_df(features_list):
-    numbers = [int(x[:-4]) for x in os.listdir(path)]
+    numbers = [int(x[:-4]) for x in os.listdir(path) if x.endswith('.csv')]
     df_list = []
     churn_rate_list = []
     for i in tqdm(range(len(numbers)-1)):
