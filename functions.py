@@ -12,7 +12,7 @@ def clean_data(file):
                                          ,'ta_app_start'
                                          ,'ta_app_end'
                                          ,'new_grade'
-                                         ,'skilled_player'])]
+                                         ,'skilled_player'])] 
     data['#event_time'] = pd.to_datetime(data['#event_time'])
     data['date'] = data['#event_time'].dt.date
 
@@ -25,7 +25,6 @@ def get_churn_ids(file):
     data = data[~data['#event_name'].isin(['push_send'
                                              ,'xs_user_online'
                                              ,'ta_app_start'
-                                             ,'ta_app_end'
                                              ,'new_grade'
                                              ,'skilled_player'])]
     churn_ids = data['#account_id'].unique().tolist()
@@ -53,13 +52,21 @@ def get_df(data):
               '#network_type',
               #'birthday',
               'register_time',
-              'qudao'
+              'qudao',
+              '#event_time'
              ]].copy()
 
     df_.drop_duplicates(subset='#account_id',keep='last', inplace=True, ignore_index=True)
-
-    df = df.merge(df_, on='#account_id', how='left')
+    # change register_time to register_days
+    for d in ['register_time','#event_time']:
+        df_[d] = pd.to_datetime(df_[d]).dt.date
+    df_['register_days'] = df_['#event_time'] - df_['register_time']
+    df_['register_days'] = df_['register_days'].apply(lambda x: x.days)
+    
+    df = df.merge(df_.drop(['#event_time'],axis=1), on='#account_id', how='left')
     df.set_index('#account_id', inplace=True)
+    
+    
     
     return df
 
@@ -86,6 +93,12 @@ def get_event_time_by_event(data):
     group = group.unstack()
     group.columns = ['_'.join(t) for t in group.columns]
     return group
+
+# app使用时长
+def app_duration(data):
+    duration = data[data['#event_name']=='ta_app_end'].groupby('#account_id')['#duration'].agg(['sum','max','min','mean'])
+    duration = duration.add_prefix('Duration_')
+    return duration
 
 # 人机本
 def ai_guide(data):
@@ -158,7 +171,7 @@ def view_page(data):
     # 个人页
     ## 看的是自己的个人页还是别人的个人页
     view_userpage = data[data['#event_name']=='view_user_homepage'].groupby(['#account_id','myself']).size().unstack()
-    view_userpage.rename(columns={'False':'VIEW_page_others_home','True':'VIEW_page_my_home'}, inplace=True)
+    view_userpage.rename(columns={False:'VIEW_page_others_home',True:'VIEW_page_my_home'}, inplace=True)
     ## 看了多少个别的用户的个人页
     view_userpage2 = data[(data['#event_name']=='view_user_homepage')&(data['myself']==False)]\
                     .groupby(['#account_id'])['target_uid'].nunique().to_frame(name='VIEW_page_others_home_nunique')
@@ -200,7 +213,8 @@ def view_click_rooms(data):
         # 是否滑动页面 unique_room_cnt >5 则滑动页面
         if k=='exposure':
             for tab in data[data['#event_name']=='flow_exposure']['tab'].unique():
-                rooms_bytab_unique['is_slide_TAB_%s'%tab] = np.where(rooms_bytab_unique['VIEW_rooms_TAB_%s_uniqueRoomCnt'%tab] > 5,1,0)
+                rooms_bytab_unique['is_slide_TAB_%s'%tab] = np.where(rooms_bytab_unique['VIEW_rooms_TAB_%s_uniqueRoomCnt'%tab]\
+                                                                     > 5,1,0)
     
         df = pd.concat([tabs, rooms, rooms_unique, rooms_bytab, rooms_bytab_unique])
         df_list.append(df)
@@ -212,9 +226,106 @@ def view_click_rooms(data):
     df_features['RATE_click_rooms'] = df_features['CLICK_rooms_roomCnt']/df_features['VIEW_rooms_roomCnt']
     
     for tab in data[data['#event_name']=='flow_click']['tab'].unique(): 
-        df_features['RATE_click_rooms_TAB_%s'%tab] = df_features['CLICK_rooms_TAB_%s_roomCnt'%tab] / df_features['VIEW_rooms_TAB_%s_roomCnt'%tab]
+        df_features['RATE_click_rooms_TAB_%s'%tab] = df_features['CLICK_rooms_TAB_%s_roomCnt'%tab] / \
+                                                     df_features['VIEW_rooms_TAB_%s_roomCnt'%tab]
     
     
+    return df_features
+
+# 房间内行为
+def in_room(data):
+    # 进房次数
+    enter_room = data[data['#event_name']=='enter_room'].groupby('#account_id').size().to_frame(name='CNT_enter_room')
+    
+    ## 进房类型
+    enter_room_byType = data[data['#event_name']=='enter_room'].groupby(['#account_id','room_type']).size().unstack()
+    enter_room_byType = enter_room_byType.add_prefix('enter_room_TYPE_')
+    
+    enter_room_uniqueType = data[data['#event_name']=='enter_room'].groupby(['#account_id'])['room_type'].nunique().to_frame(name='enter_room_uniqueType')
+    
+    ## 进房入口
+    enter_room_byRefer = data[data['#event_name']=='enter_room'].groupby(['#account_id','refer']).size().unstack()
+    enter_room_byRefer = enter_room_byRefer.add_prefix('enter_room_REFER_')
+    
+    enter_room_uniqueRefer = data[data['#event_name']=='enter_room'].groupby(['#account_id'])['refer'].nunique().to_frame(name='enter_room_uniqueRefer')
+    
+    # 房间停留时间
+    room_duration = data[data['#event_name']=='exit_room'].groupby('#account_id')['#duration'].agg(['sum','mean','max','min'])
+    room_duration = room_duration.add_prefix('DURATION_room_')
+    
+    room_duration_byType = data[data['#event_name']=='exit_room'].groupby(['#account_id','room_type'])['#duration'].agg(['sum','mean','max','min']).unstack()
+    room_duration_byType.columns = ['_TYPE_'.join(col).strip() for col in \
+                                    room_duration_byType.columns.values]
+    room_duration_byType = room_duration_byType.add_prefix('DURATION_room_')
+    
+    # 创建房间
+    create_room = data[data['#event_name']=='create_room'].groupby('#account_id').size().to_frame(name='CNT_create_room')
+    
+    create_room_byType = data[data['#event_name']=='create_room'].groupby(['#account_id','room_type']).size().unstack()
+    create_room_byType = create_room_byType.add_prefix('create_room_TYPE_')
+    
+    create_room_uniqueType = data[data['#event_name']=='create_room']\
+                            .groupby(['#account_id'])['room_type']\
+                            .nunique()\
+                            .to_frame(name='create_room_uniqueType')
+    
+    # 点击头像
+    click_profile = data[data['#event_name']=='room_click'].groupby("#account_id").size().to_frame(name='CNT_room_click_profile')
+    
+    # 点击邀请
+    click_invite = data[data['#event_name']=='room_invite'].groupby("#account_id").size().to_frame(name='CNT_room_click_invite')
+    
+    click_invite_byRoomType = data[data['#event_name']=='room_invite'].groupby(["#account_id",'room_type']).size().unstack()
+    click_invite_byRoomType = click_invite_byRoomType.add_prefix('room_invite_ROOMTYPE_')
+    
+    click_invite_byGameType = data[data['#event_name']=='room_invite'].groupby(["#account_id",'game_type']).size().unstack()
+    click_invite_byGameType = click_invite_byGameType.add_prefix('room_invite_GAMETYPE_')
+
+    # 点击搜索
+    click_search = data[data['#event_name']=='room_search_click'].groupby("#account_id").size().to_frame(name='CNT_room_search_click')
+    
+    # 聊天
+    room_chat = data[data['#event_name']=='room_public_chat'].groupby('#account_id').size().to_frame(name='CNT_room_chat')
+    
+    room_chat_byType = data[data['#event_name']=='room_public_chat'].groupby(['#account_id','msg_type']).size().unstack()
+    room_chat_byType = room_chat_byType.add_prefix('room_chat_TYPE')
+    
+    # 上麦
+    on_mic = data[data['#event_name']=='on_mic'].groupby('#account_id').size().to_frame(name='CNT_on_mic')
+    
+    on_mic_byRoomType = data[data['#event_name']=='on_mic'].groupby(["#account_id",'room_type']).size().unstack()
+    on_mic_byRoomType = on_mic_byRoomType.add_prefix('on_mic_ROOMTYPE_')
+    
+    on_mic_byGameType = data[data['#event_name']=='on_mic'].groupby(["#account_id",'game_type']).size().unstack()
+    on_mic_byGameType = on_mic_byGameType.add_prefix('on_mic_GAMETYPE_')
+    
+    # 下麦
+    off_mic_duration = data[data['#event_name']=='room_off_mic']\
+                        .groupby(['#account_id'])['duration']\
+                        .agg(['max','min','sum','mean'])
+    off_mic_duration = off_mic_duration.add_prefix('DURATION_on_mic_')
+    
+    df_features = pd.concat([enter_room
+                            ,enter_room_byType
+                            ,enter_room_uniqueType
+                            ,enter_room_byRefer
+                            ,enter_room_uniqueRefer
+                            ,room_duration
+                            ,room_duration_byType
+                            ,create_room
+                            ,create_room_byType
+                            ,create_room_uniqueType
+                            ,click_profile
+                            ,click_invite
+                            ,click_invite_byRoomType
+                            ,click_invite_byGameType
+                            ,click_search
+                            ,room_chat
+                            ,room_chat_byType
+                            ,on_mic
+                            ,on_mic_byRoomType
+                            ,on_mic_byGameType
+                            ,off_mic_duration])
     return df_features
 
 # 游戏相关
@@ -242,7 +353,8 @@ def game_match(data):
                                 .agg(['max','min','sum','mean'])\
                                 .unstack()
 
-    game_match_success_duration_by_type.columns = ['_TYPE_'.join(col).strip() for col in game_match_success_duration_by_type.columns.values]
+    game_match_success_duration_by_type.columns = ['_TYPE_'.join(col).strip() for col in \
+                                                   game_match_success_duration_by_type.columns.values]
     game_match_success_duration_by_type = game_match_success_duration_by_type.add_prefix('DURATION_game_match_success_')
 
     
@@ -258,6 +370,8 @@ def game_match(data):
         
     return gm
 
+################################################################################################################################
+
 def add_features(data, features_list):
     features_dict = {
         'cue':count_unique_event(data),
@@ -269,12 +383,16 @@ def add_features(data, features_list):
         'cb':click_button(data),
         'vp':view_page(data),
         'vcr':view_click_rooms(data),
-        'gm':game_match(data)
+        'gm':game_match(data),
+        'ir':in_room(data),
+        'dur':app_duration(data)
                     }
     features_list_=[]
     for f in features_list:
         features_list_.append(features_dict[f])
     return pd.concat(features_list_)
+
+################################################################################################################################
 
 def fe(file1, file2, features_list):
     
@@ -288,6 +406,8 @@ def fe(file1, file2, features_list):
     df_featured['churn'] = df_featured.index.map(lambda x: 1 if x in churn_ids else 0)
     
     return df_featured
+
+################################################################################################################################
                             
 def get_big_df(features_list):
     numbers = [int(x[:-4]) for x in os.listdir(path) if x.endswith('.csv')]
@@ -299,6 +419,5 @@ def get_big_df(features_list):
                 features_list)
         churn_rate_list.append(df['churn'].sum()/len(df))
         df_list.append(df)
-
     big_df = pd.concat(df_list, ignore_index=True)    
     return big_df, numbers, churn_rate_list                        
